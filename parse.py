@@ -105,11 +105,16 @@ class WorldDatParser(Parser):
             number = self.parse_int()
             self.expect_bytes(b'\0\0\0')
             self.dump_short()
-            for each in range(20):
+            for each in range(19):
                 for each in self.array_int('Ints'):
                     self.dump_int()
                 for each in self.array_int('Shorts'):
                     self.dump_short()
+            self.expect_int(0)
+            for each in self.array_int('Ints'):
+                self.dump_int()
+            for each in self.array_int('Shorts'):
+                self.dump_short()
             self.output("Point 1")
             self.dump_int()
             self.dump_int()

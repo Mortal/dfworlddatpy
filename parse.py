@@ -79,8 +79,10 @@ class MultiFormat(Format):
         else:
             for i, fmt in enumerate(self.get_formats(fp)):
                 indent = self.indent_fmt % i
+                pos = fp.tell()
                 for line in fmt.dump(fp):
                     yield '%s%s' % (indent, line)
+                #yield 'Length: %d' % (fp.tell() - pos)
 
 class Skip(Format):
     def parse(self, fp):
@@ -148,6 +150,8 @@ class VectorInt(MultiFormat):
     indent_fmt = '[%d] '
     def get_formats(self, fp):
         n = Int().parse(fp)
+        if n > 0x10000:
+            raise Exception("Vector too large (0x%x)" % n)
         return n * (self.args[0],)
 
 class Output(Format):
@@ -282,14 +286,16 @@ def skip(do_skip, *args):
     else:
         return Tuple(args)
 
-world_dat = make_tuple(
-    # World header
-    make_tuple(
-        Short(),
-        Skip(Bytes(168)),
-    ),
+world_header = make_tuple(
+    Short(),
+    Array(16, Int(), short=True),
+    Bytes(104),
     # World name
     DFstring(),
+)
+
+world_dat = make_tuple(
+    world_header,
     skip(True,
         # Generated raw blocks
         NamedTuple(
@@ -319,225 +325,237 @@ world_dat = make_tuple(
                 ),
             ),
         ),
-        Int(),
-        Int(),
-        vector_of_int,
+        Expect(Int(), 0),
+        Expect(Int(), 0),
         vector_of_int,
     ),
-    Bytes(58),
-    skip(True,
-        make_array(11,
+    vector_of_int,
+    Expect(Bytes(58),
+        b'\0\0\0\0\0\0\0\0'
+        b'\0\0\0\0\0\0\0\0'
+        b'\0\0\0\0\0\0\0\0'
+        b'\1\0\0\0\0\0\0\0'
+        b'\0\0\0\0\0\0\0\0'
+        b'\0\0\0\0\0\0\0\0'
+        b'\0\0\0\0\0\0\0\0'
+        b'\0\0'
+        ),
+    skip(False,
+        make_array(11, # 11 or 24
             Expect(Pstring(), b'SUBTERRANEAN_ANIMAL_PEOPLES'),
             Expect(Short(), 0x19),
             Expect(Short(), 0x4b),
-            Int(),
+            Int(), # 1, 2, 3, ...
             Expect(Bytes(3), b'\0\0\0'),
-            Short(),
-            make_array(18,
+            Short(), # 524, 526, 517, 528, 529, 530, 511, 529
+            skip(True,
+                make_array(18,
+                    vector_of_int,
+                    vector_of_short,
+                ),
+                vector_of_int,
                 vector_of_int,
                 vector_of_short,
-            ),
-            vector_of_int,
-            vector_of_int,
-            vector_of_short,
-            vector_of_int,
-            vector_of_short,
-            Output("Point 1"),
-            Int(),
-            Int(),
-            make_array(10,
                 vector_of_int,
                 vector_of_short,
-            ),
-            Output("Point 2"),
-            make_array(2,
-                vector_of_short,
+                Int(),
+                Int(),
+                make_array(10,
+                    vector_of_int,
+                    vector_of_short,
+                ),
+                make_array(2,
+                    vector_of_short,
+                    vector_of_int,
+                ),
+                Expect(Int(), 0),
+                make_array(9,
+                    vector_of_short,
+                    vector_of_int,
+                ),
+                Bytes(0x12),
                 vector_of_int,
-            ),
-            Expect(Int(), 0),
-            Output("Point 3"),
-            make_array(9,
-                vector_of_short,
-                vector_of_int,
-            ),
-            Bytes(0x12),
-            Output("Point 4"),
-            vector_of_int,
-            make_array(2,
-                vector_of_short,
-                vector_of_int,
-            ),
-            Bytes(14),
-            Output("Point 5"),
-            make_array(15,
-                vector_of_short,
-                vector_of_int,
-            ),
-            make_array(2,
-                vector_of_int,
-                vector_of_short,
+                make_array(2,
+                    vector_of_short,
+                    vector_of_int,
+                ),
+                Bytes(14),
+                make_array(15,
+                    vector_of_short,
+                    vector_of_int,
+                ),
+                make_array(2,
+                    vector_of_int,
+                    vector_of_short,
+                ),
             ),
             Expect(Int(), 1),
             Short(),
-            Bytes(260),
+            Bytes(256),
+            Int(),
         ),
     ),
-    Pstring(),
-    Bytes(0x45),
-    skip(True,
-        make_array(18,
-            vector_of_short,
-            vector_of_int,
-        ),
-        make_array(2,
-            vector_of_int,
-            vector_of_short,
-        ),
-        make_array(2,
-            vector_of_short,
-            vector_of_int,
-        ),
-        vector_of_short,
-        vector_of_short,
+    skip(False,
+        Pstring(),
+        Short(),
+        Short(),
+        Int(),
+        Bytes(0x3d),
+    ),
+    make_array(18,
         vector_of_short,
         vector_of_int,
-        make_array(7,
-            vector_of_int,
-            vector_of_short,
-        ),
-        vector_of_short,
-        vector_of_int,
-        vector_of_int,
-        vector_of_int,
-        vector_of_int,
-        make_array(9,
-            vector_of_short,
-            vector_of_int,
-        ),
-        Bytes(0x12),
-        vector_of_short,
-        vector_of_short,
-        vector_of_short,
-        vector_of_short,
-        vector_of_short,
-        vector_of_short,
-        vector_of_short,
-        vector_of_short,
-        vector_of_short,
-        vector_of_short,
-        vector_of_short,
-        vector_of_short,
-        vector_of_short,
-        vector_of_short,
-        vector_of_short,
-        make_array(10,
-            vector_of_short,
-            vector_of_int,
-        ),
-        Bytes(0x24),
-        vector_of_int,
-        vector_of_int,
+    ),
+    make_array(2,
         vector_of_int,
         vector_of_short,
+    ),
+    make_array(2,
+        vector_of_short,
+        vector_of_int,
+    ),
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    vector_of_int,
+    make_array(7,
         vector_of_int,
         vector_of_short,
-        Bytes(14*16-2),
+    ),
+    vector_of_short,
+    vector_of_int,
+    vector_of_int,
+    vector_of_int,
+    vector_of_int,
+    make_array(9,
+        vector_of_short,
         vector_of_int,
-        vector_of_byte,
+    ),
+    Bytes(0x12),
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    vector_of_short,
+    make_array(10,
+        vector_of_short,
         vector_of_int,
+    ),
 
-        Bytes(0xB8),
-        # MONARCH
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x6f),
-        # GENERAL
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x77),
-        # LIEUTENANT
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x77),
-        # CAPTAIN
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x6d),
-        # OUTPOST_LIAISON
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x77),
-        # DIPLOMAT
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x7b),
-        # MILITIA_COMMANDER
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x7F),
-        # MILITIA_CAPTAIN
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x6D),
-        # SHERIFF
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x7F),
-        # CAPTAIN_OF_THE_GUARD
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x75),
-        # EXPEDITION_LEADER
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x6F),
-        # MAYOR
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x6F),
-        # MANAGER
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x7F),
-        # CHIEF_MEDICAL_DWARF
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x7F),
-        # BROKER
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x7F),
-        # BOOKKEEPER
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x7F),
-        # DUKE
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x77),
-        # COUNT
-        DFstring(),
-        Bytes(28),
-        make_array(16, DFstring()),
-        Bytes(0x77),
-    ),
+    VectorInt(make_tuple(Short(), Int(), Short())),
+    Bytes(16),
+    vector_of_int,
+    vector_of_int,
+    vector_of_int,
+    vector_of_short,
+    Bytes(14*16-2),
+    Bytes(14),
+    vector_of_int,
+    vector_of_byte,
+    vector_of_int,
+
+    vector_of_int,
+    Bytes(0x84),
+    # MONARCH
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x6f),
+    # GENERAL
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x77),
+    # LIEUTENANT
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x77),
+    # CAPTAIN
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x6d),
+    # OUTPOST_LIAISON
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x77),
+    # DIPLOMAT
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x7b),
+    # MILITIA_COMMANDER
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x7F),
+    # MILITIA_CAPTAIN
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x6D),
+    # SHERIFF
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x7F),
+    # CAPTAIN_OF_THE_GUARD
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x75),
+    # EXPEDITION_LEADER
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x6F),
+    # MAYOR
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x6F),
+    # MANAGER
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x7F),
+    # CHIEF_MEDICAL_DWARF
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x7F),
+    # BROKER
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x7F),
+    # BOOKKEEPER
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x7F),
+    # DUKE
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x77),
+    # COUNT
+    DFstring(),
+    Bytes(28),
+    make_array(16, DFstring()),
+    Bytes(0x77),
     # BARON
     DFstring(),
     Bytes(28),
@@ -558,9 +576,9 @@ world_dat = make_tuple(
     Bytes(28),
     make_array(16, DFstring()),
 
-    Output(75 * '='),
-    Output("Rest:"),
-    Rest()
+    #Output(75 * '='),
+    #Output("Rest:"),
+    #Rest()
 )
 
 
@@ -691,7 +709,9 @@ def main():
     with open(world_dat_path, 'rb') as world_dat_fp:
         #world_dat = WorldDatParser(world_dat_fp, sys.stdout)
         #world_dat.dump()
-        for line in world_dat.dump(RecallFile(world_dat_fp)):
+        #for line in world_dat.dump(RecallFile(world_dat_fp)):
+        #    print(line)
+        for line in world_header.dump(RecallFile(world_dat_fp)):
             print(line)
 
 if __name__ == '__main__':

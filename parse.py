@@ -51,6 +51,9 @@ class RecallFile(object):
             self._buffers[-1] += s
         return s
 
+    def seek(self, n):
+        return self._fp.seek(n)
+
     def tell(self):
         return self._fp.tell()
 
@@ -59,29 +62,67 @@ class Format(object):
         self.args = args
         self.kwargs = kwargs
 
+    def skip(self, fp):
+        for i in self.dump(fp):
+            pass
+
 class Atom(Format):
     def dump(self, fp):
         yield str(self.parse(fp))
 
+def stats(a):
+    if not a:
+        return 'Empty'
+    if len(a) == 1:
+        return 'Singleton'
+    s = sorted(a)
+    distinct = 1
+    simple_inversions = 0
+    for i in range(1, len(s)):
+        if s[i-1] != s[i]:
+            distinct += 1
+        if s[i-1] > s[i]:
+            simple_inversions += 1
+    return ('%d items in range [%s, %s], %s distinct, %s simple inversions'
+            % (len(a), s[0], s[-1],
+                'all' if distinct == len(a) else distinct,
+                simple_inversions))
+
 class MultiFormat(Format):
     def parse(self, fp):
+        return [fmt.parse(fp) for fmt in self.get_formats(fp)]
+
+    def skip(self, fp):
         for fmt in self.get_formats(fp):
-            yield fmt.parse(fp)
+            fmt.skip(fp)
 
     def dump(self, fp):
         if self.kwargs.get('short', False):
             pos = fp.tell()
             fp.push()
-            items = [str(fmt.parse(fp)) for fmt in self.get_formats(fp)]
+            items = self.parse(fp)
             yield from hexdump(pos, fp.pop())
-            yield '[%s]' % ', '.join(items)
+            if len(items) > 1:
+                yield stats(items)
+            yield '[%s]' % ', '.join(str(each) for each in items)
 
         else:
             for i, fmt in enumerate(self.get_formats(fp)):
                 indent = self.indent_fmt % i
                 pos = fp.tell()
-                for line in fmt.dump(fp):
-                    yield '%s%s' % (indent, line)
+                try:
+                    for line in fmt.dump(fp):
+                        yield '%s%s' % (indent, line)
+                except KeyboardInterrupt:
+                    raise
+                except SystemExit:
+                    raise
+                except:
+                    yield '%s%s' % (indent,
+                            'Exception raised when parsing at 0x%08x:' % pos)
+                    fp.seek(pos)
+                    yield from Bytes(0x100).dump(fp)
+                    raise
                 #yield 'Length: %d' % (fp.tell() - pos)
 
 class Skip(Format):
@@ -89,8 +130,7 @@ class Skip(Format):
         self.args[0].parse(fp)
 
     def dump(self, fp):
-        for line in self.args[0].dump(fp):
-            pass
+        self.args[0].skip(fp)
         yield from []
 
 class Struct(Atom):
@@ -113,6 +153,8 @@ class Int(Struct):
 class Pstring(Format):
     def parse(self, fp):
         n = Short().parse(fp)
+        if n < 0:
+            raise Exception("Pstring has negative length %d" % n)
         return fp.read(n)
 
     def dump(self, fp):
@@ -121,6 +163,10 @@ class Pstring(Format):
 class DFstring(Format):
     def parse(self, fp):
         n = Short().parse(fp)
+        if n < 0:
+            raise Exception("DFstring has negative length: %d" % n)
+        if n > 80:
+            raise Exception("DFstring is longer than 80: %d" % n)
         return fp.read(n).decode('cp437')
 
     def dump(self, fp):
@@ -140,6 +186,10 @@ class NamedTuple(Format):
         for k in self.args[0]:
             yield "%s:" % k
             yield from self.args[1].dump(fp)
+
+    def skip(self, fp):
+        for i in range(len(self.args[0])):
+            self.args[1].skip(fp)
 
 class Array(MultiFormat):
     indent_fmt = '[%d] '
@@ -161,12 +211,42 @@ class Output(Format):
     def dump(self, fp):
         yield from [self.args[0]]
 
+    def skip(self, fp):
+        pass
+
 class Expect(Format):
     def parse(self, fp):
         got = self.args[0].parse(fp)
         expected = self.args[1]
         if got != expected:
-            raise Exception("Expected %r, got %r" % (expected, got))
+            raise Exception("Expected:\n%r\nGot:\n%r"
+                    % (expected, got))
+
+    def dump(self, fp):
+        self.parse(fp)
+        yield from []
+
+class ExpectBytes(Format):
+    def parse(self, fp):
+        got = fp.read(len(self.args[0]))
+        expected = self.args[0]
+        if got != expected:
+            raise Exception("Expected:\n%s\nGot:\n%s"
+                    % ('\n'.join(hexdump(0, expected)),
+                        '\n'.join(hexdump(0, got))))
+
+    def dump(self, fp):
+        self.parse(fp)
+        yield from []
+
+class ExpectZeros(Format):
+    def parse(self, fp):
+        n = int(self.args[0])
+        got = Bytes(n).parse(fp)
+        expected = b'\0' * n
+        if got != expected:
+            raise Exception("Expected %d zero bytes, got:\n%s"
+                    % (n, '\n'.join(hexdump(0, got))))
 
     def dump(self, fp):
         self.parse(fp)
@@ -188,6 +268,19 @@ class Rest(Format):
     def dump(self, fp):
         pos = fp.tell()
         yield from hexdump(pos, fp.read())
+
+class Break(Format):
+    def parse(self, fp):
+        return None
+
+    def dump(self, fp):
+        yield 'Press a key to continue...'
+        try:
+            line = sys.stdin.readline()
+        except KeyboardInterrupt:
+            raise SystemExit()
+        if not line:
+            raise SystemExit()
 
 class Parser(object):
     def __init__(self, fp, dest):
@@ -286,122 +379,66 @@ def skip(do_skip, *args):
     else:
         return Tuple(args)
 
-world_header = make_tuple(
+subterranean_animal_peoples = make_tuple(
+    #Expect(Pstring(), b'SUBTERRANEAN_ANIMAL_PEOPLES'),
+    Expect(Short(), 0x19),
+    Expect(Short(), 0x4b),
+    Int(), # 1, 2, 3, ...
+    ExpectZeros(3),
+    Short(), # 524, 526, 517, 528, 529, 530, 511, 529
+    skip(True,
+        make_array(18,
+            vector_of_int,
+            vector_of_short,
+        ),
+        vector_of_int,
+        vector_of_int,
+        vector_of_short,
+        vector_of_int,
+        vector_of_short,
+        Int(),
+        Int(),
+        make_array(10,
+            vector_of_int,
+            vector_of_short,
+        ),
+        make_array(2,
+            vector_of_short,
+            vector_of_int,
+        ),
+        Expect(Int(), 0),
+        make_array(9,
+            vector_of_short,
+            vector_of_int,
+        ),
+        Bytes(0x12),
+        vector_of_int,
+        make_array(2,
+            vector_of_short,
+            vector_of_int,
+        ),
+        Bytes(14),
+        make_array(15,
+            vector_of_short,
+            vector_of_int,
+        ),
+        make_array(2,
+            vector_of_int,
+            vector_of_short,
+        ),
+    ),
+    Expect(Int(), 1),
     Short(),
-    Array(16, Int(), short=True),
-    Bytes(104),
-    # World name
-    DFstring(),
+    Bytes(256),
+    Int(),
 )
 
-world_dat = make_tuple(
-    world_header,
-    skip(True,
-        # Generated raw blocks
-        NamedTuple(
-            ("inorganic_generated", "unknown layer",
-                "creature_layer", "interaction_layer"),
-            make_tuple(
-                VectorInt(
-                    # Raw block
-                    VectorInt(
-                        # Raw
-                        Pstring()
-                    ),
-                ),
-            ),
-        ),
-        # Tag blocks
-        NamedTuple("""
-            Material Plant Body1 Body2 Creature Item Workshop EntityCiv Word
-            NameTag MainCiv Color1 Shape Color2 Reaction MaterialTemplate
-            TissueTemplate BodyDetailPlan CreatureVariation Interaction
-            """.split(),
-            make_tuple(
-                # Tag block
-                VectorInt(
-                    # Tag
-                    Pstring(),
-                ),
-            ),
-        ),
-        Expect(Int(), 0),
-        Expect(Int(), 0),
-        vector_of_int,
-    ),
-    vector_of_int,
-    Expect(Bytes(58),
-        b'\0\0\0\0\0\0\0\0'
-        b'\0\0\0\0\0\0\0\0'
-        b'\0\0\0\0\0\0\0\0'
-        b'\1\0\0\0\0\0\0\0'
-        b'\0\0\0\0\0\0\0\0'
-        b'\0\0\0\0\0\0\0\0'
-        b'\0\0\0\0\0\0\0\0'
-        b'\0\0'
-        ),
-    skip(False,
-        make_array(11, # 11 or 24
-            Expect(Pstring(), b'SUBTERRANEAN_ANIMAL_PEOPLES'),
-            Expect(Short(), 0x19),
-            Expect(Short(), 0x4b),
-            Int(), # 1, 2, 3, ...
-            Expect(Bytes(3), b'\0\0\0'),
-            Short(), # 524, 526, 517, 528, 529, 530, 511, 529
-            skip(True,
-                make_array(18,
-                    vector_of_int,
-                    vector_of_short,
-                ),
-                vector_of_int,
-                vector_of_int,
-                vector_of_short,
-                vector_of_int,
-                vector_of_short,
-                Int(),
-                Int(),
-                make_array(10,
-                    vector_of_int,
-                    vector_of_short,
-                ),
-                make_array(2,
-                    vector_of_short,
-                    vector_of_int,
-                ),
-                Expect(Int(), 0),
-                make_array(9,
-                    vector_of_short,
-                    vector_of_int,
-                ),
-                Bytes(0x12),
-                vector_of_int,
-                make_array(2,
-                    vector_of_short,
-                    vector_of_int,
-                ),
-                Bytes(14),
-                make_array(15,
-                    vector_of_short,
-                    vector_of_int,
-                ),
-                make_array(2,
-                    vector_of_int,
-                    vector_of_short,
-                ),
-            ),
-            Expect(Int(), 1),
-            Short(),
-            Bytes(256),
-            Int(),
-        ),
-    ),
-    skip(False,
-        Pstring(),
-        Short(),
-        Short(),
-        Int(),
-        Bytes(0x3d),
-    ),
+mountain = make_tuple(
+    #Expect(Pstring(), b'MOUNTAIN'),
+    Short(),
+    Short(),
+    Int(),
+    Bytes(0x3d),
     make_array(18,
         vector_of_short,
         vector_of_int,
@@ -465,114 +502,169 @@ world_dat = make_tuple(
     vector_of_int,
 
     vector_of_int,
-    Bytes(0x84),
-    # MONARCH
+)
+
+class DFNamedSections(Format):
+    def parse(self, fp):
+        while True:
+            n = Pstring().parse(fp)
+            if n == b'SUBTERRANEAN_ANIMAL_PEOPLES':
+                yield subterranean_animal_peoples.parse(fp)
+            elif n == b'MOUNTAIN':
+                yield mountain.parse(fp)
+                return
+
+    def dump(self, fp):
+        i = 0
+        while True:
+            n = Pstring().parse(fp)
+            if n == b'SUBTERRANEAN_ANIMAL_PEOPLES':
+                for line in subterranean_animal_peoples.dump(fp):
+                    yield '#%d %s' % (i, line)
+                i = i + 1
+            elif n == b'MOUNTAIN':
+                yield 'Done processing SUBTERRANEAN_ANIMAL_PEOPLES'
+                yield from mountain.dump(fp)
+                return
+
+world_header = make_tuple(
+    Short(),
+    Array(16, Int(), short=True),
+    Bytes(104),
+    # World name
     DFstring(),
+)
+
+world_dat = make_tuple(
+    skip(True, world_header),
+    skip(True,
+        # Generated raw blocks
+        NamedTuple(
+            ("inorganic_generated", "unknown layer",
+                "creature_layer", "interaction_layer"),
+            VectorInt(
+                # Raw block
+                VectorInt(
+                    # Raw
+                    Pstring()
+                ),
+            ),
+        ),
+        # Tag blocks
+        NamedTuple("""
+            Material Plant Body1 Body2 Creature Item Workshop EntityCiv Word
+            NameTag MainCiv Color1 Shape Color2 Reaction MaterialTemplate
+            TissueTemplate BodyDetailPlan CreatureVariation Interaction
+            """.split(),
+            # Tag block
+            VectorInt(
+                # Tag
+                Pstring(),
+            ),
+        ),
+        VectorInt(Tuple((Int(), Int())), short=True),
+        Expect(Int(), 0),
+        vector_of_int,
+        vector_of_int,
+    ),
+    skip(True,
+        vector_of_int,
+        ExpectZeros(20),
+        vector_of_int,
+        vector_of_int,
+        VectorInt(Int()),
+    ),
+    #Bytes(18),
+    Bytes(0x100),
+    Break(),
+    DFNamedSections(),
+    Output('Begin processing MONARCH, GENERAL et al'),
+    Bytes(0x84),
+    Expect(DFstring(), 'MONARCH'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x6f),
-    # GENERAL
-    DFstring(),
+    Expect(DFstring(), 'GENERAL'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x77),
-    # LIEUTENANT
-    DFstring(),
+    Expect(DFstring(), 'LIEUTENANT'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x77),
-    # CAPTAIN
-    DFstring(),
+    Expect(DFstring(), 'CAPTAIN'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x6d),
-    # OUTPOST_LIAISON
-    DFstring(),
+    Expect(DFstring(), 'OUTPOST_LIAISON'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x77),
-    # DIPLOMAT
-    DFstring(),
+    Expect(DFstring(), 'DIPLOMAT'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x7b),
-    # MILITIA_COMMANDER
-    DFstring(),
+    Expect(DFstring(), 'MILITIA_COMMANDER'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x7F),
-    # MILITIA_CAPTAIN
-    DFstring(),
+    Expect(DFstring(), 'MILITIA_CAPTAIN'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x6D),
-    # SHERIFF
-    DFstring(),
+    Expect(DFstring(), 'SHERIFF'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x7F),
-    # CAPTAIN_OF_THE_GUARD
-    DFstring(),
+    Expect(DFstring(), 'CAPTAIN_OF_THE_GUARD'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x75),
-    # EXPEDITION_LEADER
-    DFstring(),
+    Expect(DFstring(), 'EXPEDITION_LEADER'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x6F),
-    # MAYOR
-    DFstring(),
+    Expect(DFstring(), 'MAYOR'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x6F),
-    # MANAGER
-    DFstring(),
+    Expect(DFstring(), 'MANAGER'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x7F),
-    # CHIEF_MEDICAL_DWARF
-    DFstring(),
+    Expect(DFstring(), 'CHIEF_MEDICAL_DWARF'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x7F),
-    # BROKER
-    DFstring(),
+    Expect(DFstring(), 'BROKER'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x7F),
-    # BOOKKEEPER
-    DFstring(),
+    Expect(DFstring(), 'BOOKKEEPER'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x7F),
-    # DUKE
-    DFstring(),
+    Expect(DFstring(), 'DUKE'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x77),
-    # COUNT
-    DFstring(),
+    Expect(DFstring(), 'COUNT'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x77),
-    # BARON
-    DFstring(),
+    Expect(DFstring(), 'BARON'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x77),
-    # CHAMPION
-    DFstring(),
+    Expect(DFstring(), 'CHAMPION'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x87),
-    # HAMMERER
-    DFstring(),
+    Expect(DFstring(), 'HAMMERER'),
     Bytes(28),
     make_array(16, DFstring()),
     Bytes(0x83),
-    # FORCED_ADMINISTRATORS
-    DFstring(),
+    Expect(DFstring(), 'FORCED_ADMINISTRATOR'),
     Bytes(28),
     make_array(16, DFstring()),
 
@@ -709,10 +801,10 @@ def main():
     with open(world_dat_path, 'rb') as world_dat_fp:
         #world_dat = WorldDatParser(world_dat_fp, sys.stdout)
         #world_dat.dump()
-        #for line in world_dat.dump(RecallFile(world_dat_fp)):
-        #    print(line)
-        for line in world_header.dump(RecallFile(world_dat_fp)):
+        for line in world_dat.dump(RecallFile(world_dat_fp)):
             print(line)
+        #for line in world_header.dump(RecallFile(world_dat_fp)):
+        #    print(line)
 
 if __name__ == '__main__':
     main()
